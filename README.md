@@ -65,9 +65,9 @@ Binlerce öğrenciye aynı anda hizmet verebilmek için tasarlanmış, **Yüksek
 | **Moodle Node** | 10 | Eğitim Platformu (Nginx + PHP) | 192.168.1.11-20 |
 | **PostgreSQL** | 1 | Veritabanı | 192.168.1.100 |
 | **Redis** | 1 | Oturum ve Önbellek | 192.168.1.185 |
-| **NFS** | 1 | Ortak Dosya Depolama | 192.168.1.50 |
+| **NFS**(vm) | 1 | Ortak Dosya Depolama | 192.168.1.50 |
 | **Scalelite** | 1 | BBB Yük Dengeleyici | 192.168.1.60 |
-| **BigBlueButton** | N | Canlı Ders Sunucuları | 192.168.1.70+ |
+| **BigBlueButton**(vm) | N | Canlı Ders Sunucuları | 192.168.1.70+ |
 
 ---
 
