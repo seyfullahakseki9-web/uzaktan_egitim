@@ -999,111 +999,199 @@ sudo systemctl reload pgbouncer
 
 ---
 
-## 📌 Bölüm 4: Scalelite ve BigBlueButton Kümesi
+## 📌 Bölüm 4: Ortak Depolama Katmanı (NFS Server ve İzin Yönetimi)
 
-### 1️⃣ Scalelite İçin NFS Ayarı
+Dağıtık mimarinin sağlıklı çalışabilmesi için tüm Moodle web cluster düğümlerinin, BigBlueButton sunucularının ve Scalelite yük dengeleyicisinin ortak bir depolama havuzuna kararlı ve doğru yetkilerle erişmesi şarttır.
+
+---
+
+### 1️⃣ NFS Sunucusunun Kurulumu (Sunucu IP: 192.168.1.87)
+
+Ana NFS makinesinde gerekli servis paketlerini kurup paylaşım dizinlerini oluşturalım:
 
 ```bash
-sudo mkdir -p /var/bigbluebutton/spool
-sudo mkdir -p /var/bigbluebutton/published
-sudo mkdir -p /var/bigbluebutton/unpublished
+# Paket kurulumu
+sudo apt update && sudo apt install -y nfs-kernel-server
 
-sudo mount 192.168.1.50:/export/bbb_spool /var/bigbluebutton/spool
-sudo mount 192.168.1.50:/export/bbb_published /var/bigbluebutton/published
-sudo mount 192.168.1.50:/export/bbb_unpublished /var/bigbluebutton/unpublished
+# MoodleData ve Scalelite/BBB için ortak dizinlerin oluşturulması
+sudo mkdir -p /mnt/moodledata
+sudo mkdir -p /mnt/scalelite-recordings/var/bigbluebutton/spool
+sudo mkdir -p /mnt/scalelite-recordings/var/bigbluebutton/published
+sudo mkdir -p /mnt/scalelite-recordings/var/bigbluebutton/unpublished
 
-echo "192.168.1.50:/export/bbb_spool /var/bigbluebutton/spool nfs defaults,_netdev 0 0" | sudo tee -a /etc/fstab
-echo "192.168.1.50:/export/bbb_published /var/bigbluebutton/published nfs defaults,_netdev 0 0" | sudo tee -a /etc/fstab
-echo "192.168.1.50:/export/bbb_unpublished /var/bigbluebutton/unpublished nfs defaults,_netdev 0 0" | sudo tee -a /etc/fstab
-
-sudo chmod -R 755 /var/bigbluebutton/
 ```
 
 ---
 
-### 2️⃣ Scalelite Ortam Değişkenleri (.env)
+### 2️⃣ ⚠️ En Kritik Adım: Kullanıcı Kimlik ve İzin Eşleştirmesi (UID/GID)
+
+Dağıtık mimarilerde yaşanan inatçı `Permission denied` hatalarının ana kaynağı sunucular ile konteynerlerin içindeki Linux kullanıcı ID'lerinin uyuşmamasıdır.
+
+* **Moodle Sunucuları İçin (`www-data`):** Ubuntu/Debian sistemlerde Apache/Nginx web sunucusu varsayılan olarak **UID: 33** kullanır.
+* **Scalelite Konteynerleri İçin (`scalelite`):** Docker üzerinde çalışan Scalelite mikroservisleri (API, Importer, Poller) güvenlik gereği root olarak değil, **UID: 2000** kimliğine sahip `scalelite` kullanıcısı ile çalışır.
+
+Bu nedenle NFS sunucusu üzerindeki dosya izinleri bu kimliklere göre mühürlenmelidir:
 
 ```bash
-sudo nano /var/www/scalelite/.env
-```
+# Moodle verileri için sahibini www-data (33) yapalım
+sudo chown -R 33:33 /mnt/moodledata
+sudo chmod -R 775 /mnt/moodledata
 
-```bash
-URL_HOST=scalelite.argeyazilim.tr
-SCALELITE_TAG=scalelite.argeyazilim.tr
+# Scalelite/BBB kayıt süreçleri için yetkiyi doğrudan UID 2000'e (Scalelite) devredelim
+sudo chown -R 2000:2000 /mnt/scalelite-recordings/
+sudo chmod -R 777 /mnt/scalelite-recordings/
 
-# Komut: openssl rand -hex 32
-SECRET_KEY_BASE=BURAYA_OLUSTURULAN_64_KARAKTERLIK_ANAHTAR
-LOADBALANCER_SECRET=BURAYA_MOODLE_ICIN_GUCLU_SIFRE
-
-# ⚠️ PgBouncer üzerinden bağlanıyoruz (port 6432)
-DATABASE_URL=postgres://scalelite:SIFRE@192.168.1.100:6432/scalelite_production
-
-REDIS_URL=redis://192.168.1.185:6379/0
-RAILS_ENV=production
 ```
 
 ---
 
-### 3️⃣ Scalelite Poller Servisi
+### 3️⃣ Dışa Aktarma Kuralları (`/etc/exports`)
+
+NFS sunucusunun iç ağdaki istemcilere (`192.168.1.0/24`) güvenli ve sınırlandırılmamış erişim sunması için exports ayarlarını yapılandıralım:
 
 ```bash
-sudo nano /etc/systemd/system/scalelite-poller.service
+sudo nano /etc/exports
+
 ```
 
-```ini
-[Unit]
-Description=Scalelite Poller - BigBlueButton Sağlık Kontrolü
-After=network.target
+Aşağıdaki satırları dosyanın sonuna ekleyin:
 
-[Service]
-Type=simple
-User=scalelite
-WorkingDirectory=/var/www/scalelite
-EnvironmentFile=/var/www/scalelite/.env
-ExecStart=/bin/bash -c 'while true; do RAILS_ENV=production bundle exec rake poll:all; sleep 60; done'
-Restart=always
-RestartSec=10
+```text
+/mnt/moodledata 192.168.1.0/24(rw,sync,no_subtree_check,no_root_squash,insecure)
+/mnt/scalelite-recordings/var/bigbluebutton/spool 192.168.1.0/24(rw,sync,no_subtree_check,no_root_squash,insecure)
+/mnt/scalelite-recordings/var/bigbluebutton/published 192.168.1.0/24(rw,sync,no_subtree_check,no_root_squash,insecure)
+/mnt/scalelite-recordings/var/bigbluebutton/unpublished 192.168.1.0/24(rw,sync,no_subtree_check,no_root_squash,insecure)
 
-[Install]
-WantedBy=multi-user.target
 ```
+
+> 💡 `no_root_squash`: İstemci makinelerdeki root isteklerinin NFS üzerinde yetkisiz bir kullanıcıya (`nobody`) dönüştürülmesini engeller ve altyapısal izin yönetimini korur.
+
+Ayarları canlıya alalım:
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable scalelite-poller
-sudo systemctl start scalelite-poller
+sudo exportfs -ra
+sudo systemctl restart nfs-kernel-server
+
 ```
 
 ---
 
-### 4️⃣ BigBlueButton Sunucularını Scalelite'a Ekleme
+### 4️⃣ İstemci (Client) Makinelerin Yapılandırılması
+
+#### A. Moodle Web Sunucularında Bağlantı (Node 1-10)
+
+Web sunucularında ortak `moodledata` klasörünü `/etc/fstab` ile kalıcı olarak bağlayalım:
 
 ```bash
-sudo bbb-conf --secret
-# Çıktıdaki URL ve Secret değerlerini not al
+sudo mkdir -p /var/moodledata
+echo "192.168.1.87:/mnt/moodledata /var/moodledata nfs rw,relatime,hard,proto=tcp,_netdev 0 0" | sudo tee -a /etc/fstab
+sudo mount -a
 
-cd /var/www/scalelite
-RAILS_ENV=production bundle exec rake servers:add[\
-https://bbb-node-01.argeyazilim.tr/bigbluebutton/api,\
-SUNUCU_1_SECRET_KODU\
-]
+```
 
-RAILS_ENV=production bundle exec rake servers
-RAILS_ENV=production bundle exec rake servers:enable[1]
+#### B. Scalelite-Docker Sunucusunda Bağlantı
+
+Scalelite ana makinesinde, NFS üzerinden gelen yayınlanmış ve kuyruktaki kayıt yollarını host sistemine mount edelim:
+
+```bash
+sudo mkdir -p /mnt/scalelite-published
+sudo mkdir -p /mnt/scalelite-spool
+
+# /etc/fstab dosyasına ekleme
+echo "192.168.1.87:/mnt/scalelite-recordings/var/bigbluebutton/published /mnt/scalelite-published nfs4 rw,relatime,vers=4.2,hard,proto=tcp,_netdev 0 0" | sudo tee -a /etc/fstab
+echo "192.168.1.87:/mnt/scalelite-recordings/var/bigbluebutton/spool /mnt/scalelite-spool nfs4 rw,relatime,vers=4.2,hard,proto=tcp,_netdev 0 0" | sudo tee -a /etc/fstab
+
+sudo mount -a
+
 ```
 
 ---
 
-### 5️⃣ Moodle'da Scalelite Konfigürasyonu
+### 🚨 NFS Yapılandırmasında Dikkat Edilmesi Gereken Ölümcül Kurallar
 
-**Site Yönetimi → Eklentiler → BigBlueButton → Ayarlar:**
-
-| Ayar | Değer |
-|------|-------|
-| **BigBlueButton Server URL** | `https://scalelite.argeyazilim.tr/bigbluebutton/api` |
-| **Shared Secret** | `.env` dosyasındaki `LOADBALANCER_SECRET` |
+1. **`localcache` Asla NFS Üzerinde Tutulmamalıdır:** Moodle, her sayfa isteğinde binlerce küçük cache, session ve `.mustache` şablon dosyası üretir. NFS ağ protokolü bu mikro dosya kilitlerine (file locking) yetişemez, sistem **"errno=28 No space left on device"** veya **"Failed to write cache file"** uyarısıyla kilitlenir. Çözüm olarak `config.php` içerisinde `$CFG->localcachedir` değeri mutlaka sunucunun kendi yerel diski (SSD/HDD) olarak set edilmelidir (`/var/moodle_localcache`).
+2. **Konteyner İçinden İzin Kontrolü:** İzinlerin doğruluğunu teyit etmek için her zaman `docker compose exec` ile ilgili konteynerin içinden yazma testi (`mkdir`) simüle edilmelidir.
 
 ---
+
+## 📌 Bölüm 5: Scalelite ve BigBlueButton Kümesi
+
+### 1️⃣ Docker Compose Düzenlemesi (`docker-compose.yml`)
+
+NFS üzerinden sisteme bağladığımız yolları Docker ekosistemine ortak bir hacim (`&id002`) haritasıyla geçirmek için compose dosyamızı şu düzende kilitliyoruz:
+
+```yaml
+volumes: &id002
+  - /opt/scalelite/log/scalelite:/app/log
+  - /mnt/scalelite-spool:/var/bigbluebutton/spool
+  - /mnt/scalelite-published:/var/bigbluebutton/published
+
+scalelite-api:
+  image: blindsidenetwks/scalelite:v1-bionic230-alpine-api
+  restart: unless-stopped
+  security_opt:
+    - apparmor:unconfined # ⚠️ Proxmox LXC kilitlerini kırmak için kritik ayar
+  volumes: *id002
+
+scalelite-recording-importer:
+  image: blindsidenetwks/scalelite:v1-bionic230-alpine-recording-importer
+  restart: unless-stopped
+  volumes: *id002
+
+```
+
+---
+
+### 2️⃣ Proxmox VE ve AppArmor Güvenlik Duvarı Geçişi
+
+Eğer Scalelite veya Docker sunucunuz bir **Proxmox LXC Konteyneri** üzerinde koşuyorsa, Docker'ın ağ katmanlarını inşa ederken AppArmor engeline takılması çok yüksek bir ihtimaldir (`Error response from daemon: AppArmor enabled on system but... Permission denied`).
+
+Bu engeli aşmak için:
+
+1. Proxmox ana makinesinin terminaline girin.
+2. İlgili konteynerin konfigürasyon dosyasını açın: `nano /etc/pve/lxc/119.conf` (119 yerine kendi container ID'nizi yazın).
+3. Dosyanın en altına şu iki satırı ekleyin:
+```text
+lxc.apparmor.profile: unconfined
+lxc.cgroup2.devices.allow: a
+lxc.cap.drop:
+
+```
+
+
+4. Proxmox arayüzünden konteyneri **Sert Kapatıp (Shutdown/Stop)** ardından yeniden başlatın (**Cold Start**). Sadece `restart` komutu bu ayarı dinamik okuyamaz.
+
+---
+
+## 🔧 Sorun Giderme İpuçları
+
+### 🟥 Problem: `Failed to import recording: Permission denied @ dir_s_mkdir`
+
+* **Neden olur?** Scalelite Importer konteyneri (`UID 2000`), yeni gelen kaydı işledikten sonra yayınlanan kayıtlar klasörüne (`/var/bigbluebutton/published`) yazmaya çalışıyor ama NFS diski üzerinde yazma yetkisi yok.
+* **Kesin Çözüm:** NFS sunucusuna giderek ham klasörün yetkilerini güncelleyin:
+```bash
+sudo chown -R 2000:2000 /mnt/scalelite-recordings/var/bigbluebutton/published
+sudo chmod -R 777 /mnt/scalelite-recordings/var/bigbluebutton/published
+
+```
+
+
+
+### 🟥 Problem: Moodle’da `codingerror - File store path does not exist`
+
+* **Neden olur?** Moodle web sunucusu (`www-data`), `/var/moodledata` altında dinamik olarak cache klasörü açamıyor ya da NFS diski anlık olarak salt-okunur (`read-only`) moda düştü.
+* **Kesin Çözüm:** Moodle sunucu terminalinde dizinleri elinizle hazırlayıp izin verin:
+```bash
+sudo mkdir -p /var/moodledata/cache /var/moodledata/localcache /var/moodledata/muc
+sudo chown -R www-data:www-data /var/moodledata
+sudo chmod -R 775 /var/moodledata
+sudo -u www-data php /var/www/moodle/admin/cli/purge_caches.php
+
+```
+
+
+
+
 
 ## 🔧 Sorun Giderme İpuçları
 
